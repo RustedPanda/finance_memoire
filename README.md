@@ -6,4 +6,4 @@ Seuls les scripts utilisés pour traiter l'information sont mis à disposition s
 
 Les scripts Python servent à l'acquisition, le pré-traitement et le filtrage des données, ainsi qu'à la réalisation d'une étude de sentiment sur les tweets.
 
-Le script R quant à lui sert à l'analyse statistique et la réailsation des graphiques présentés dans le travail de recherche.
+Le script R quant à lui sert à l'analyse statistique et la réalisation des graphiques présentés dans le travail de recherche.
