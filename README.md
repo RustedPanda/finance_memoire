@@ -1,7 +1,6 @@
 Travail de mémoire réalisé par Ludovic Moisan
 
-## Analyse des liens entre Twitter et les marchés financiers :
-##  Un cas d’étude sur les données françaises
+## Analyse des liens entre Twitter et les marchés financiers : Un cas d’étude sur les données françaises
 
 Seuls les scripts utilisés pour traiter l'information sont mis à disposition sur ce dépôt, les contenus des tweets n'ayant pas été sujets à une anonymisation, ils ne sont pas présentables en l'état sur GitHub.
 
