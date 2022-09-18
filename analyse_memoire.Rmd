@@ -1,0 +1,794 @@
+---
+title: "analyse_memoire"
+author: "Ludovic Moisan"
+date: "`r Sys.Date()`"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r packages, include = FALSE}
+
+library(here)
+library(dplyr)
+library(lubridate)
+library(Hmisc)
+library(ggplot2)
+library(reshape2)
+library(qpcR)
+
+library(randomForest)
+
+``` 
+
+```{r load_data, include=FALSE}
+here::i_am("analyse_memoire.Rmd")
+
+airbus_market = read.csv2("market/AIR.csv", sep = ",", encoding = "UTF-8") %>% dplyr::mutate(Date = as.Date(Date))
+danone_market = read.csv2("market/BN.PA.csv", sep = ",", encoding = "UTF-8") %>% dplyr::mutate(Date = as.Date(Date))
+veolia_market = read.csv2("market/VIE.PA.csv", sep = ",", encoding = "UTF-8") %>% dplyr::mutate(Date = as.Date(Date))
+airbus_sent = read.csv2("output_clean2/Airbusdata.csv.csv", sep = ",", encoding = "UTF-8")
+danone_sent = read.csv2("output_clean2/Danonedata.csv.csv", sep = ",", encoding = "UTF-8")
+veolia_sent = read.csv2("output_clean2/Veoliadata.csv.csv", sep = ",", encoding = "UTF-8")
+
+```
+
+```{r functions, echo = FALSE}
+
+get_stats_m <- function(df_sent,df_market, company, method_corr = "spearman", month = 1){
+  df_sent$Score <- as.numeric(df_sent$Score)
+  df_sent$Date <- as.Date(df_sent$Date)
+  
+  df_sent <- df_sent %>% dplyr::filter(month(Date) == as.numeric(month))
+  df_market <- df_market %>% dplyr::filter(month(Date) == as.numeric(month))
+  
+  scores_df <- aggregate(df_sent %>% group_by(Date) %>% 
+                           dplyr::mutate(wmean = weighted.mean(Score,Retweets)) %>%
+                           dplyr::select(c(Date,Score,wmean)), FUN = mean, by = list(df_sent$Date)) %>%
+    dplyr::mutate(score_pos = sign(wmean))
+  
+  df_full <- inner_join(scores_df,df_market) %>% dplyr::mutate(dif_pos = sign(as.numeric(day_dif))) %>% mutate(across(!Date, as.numeric)) %>% na.omit()
+  
+  rcor <- rcorr(as.matrix(df_full %>% dplyr::select(-Date)), type = method_corr)
+  write.csv(rcor[["r"]], file = paste0("correlations_full/",company,"_",method_corr,"_correlation_",month,".csv"),row.names = TRUE)
+  write.csv(rcor[["P"]], file = paste0("correlations_full/",company,"_",method_corr,"_pvalue_",month,".csv"),row.names = TRUE)
+  
+
+  melted_cormat <- melt(cor(df_full %>% dplyr::select_if(is.numeric), method = as.character(method_corr)))
+  print(melted_cormat %>% dplyr::filter(Var1 == "wmean"))
+  print(melted_cormat %>% dplyr::filter(Var1 == "Score"))
+  print(melted_cormat %>% dplyr::filter(Var1 == "score_pos"))
+  write.csv(melted_cormat, file = paste0("correlations/month/",company,"_",method_corr,month,".csv"),row.names = TRUE)
+  
+
+  plot <- ggplot(data = melted_cormat, aes(x=Var1, y=Var2, fill=value)) + 
+    geom_tile() + geom_text(aes(label = round(value, 2))) + labs(title = paste0(method_corr," correlation heatmap"), subtitle = paste0(as.character(company)," company"))
+  ggsave(paste("plots/month/",as.character(company),method_corr,month,"correlation_heatmap.png", sep = "_"), plot = plot, device = "png",  width = 220, height = 140, units = "mm", dpi = 400)
+  
+  set.seed(42)
+
+  DT = df_full
+  
+  DT.simple <- DT %>% dplyr::select(c(wmean,Close,High,Low,Open,Volume,day_dif,day_shift,dif_pos))
+  
+  training_indices <- sample(nrow(DT.simple),nrow(DT.simple)*80/100)
+  
+  training.simple <- DT.simple[training_indices,]
+  testing.simple <- DT.simple[-training_indices,]
+  
+  rf.simple <- randomForest::randomForest(wmean ~ .,data = training.simple, xtest = testing.simple %>% dplyr::select(-(wmean)), ytest = testing.simple %>% dplyr::pull((wmean)), importance = TRUE, ntree = 200)
+  
+  # 1. Open jpeg file
+  png(paste0("plots_rf/month/",company,"_",month,"wmean.png"))
+  # 2. Create the plot
+  plot(rf.simple)
+  # 3. Close the file
+  dev.off()
+  importance <- data.frame(rf.simple$importance)
+  importance$SD <- rf.simple$importanceSD
+  importance$month <- month
+  write.csv(importance, file = paste0("rf/month/",company,"_",month,"_wmean.csv"),row.names = TRUE)
+  
+  set.seed(42)
+
+  DT = df_full
+  
+  DT.simple <- DT %>% dplyr::select(c(Score,Close,High,Low,Open,Volume,day_dif,day_shift,dif_pos))
+  
+  training_indices <- sample(nrow(DT.simple),nrow(DT.simple)*80/100)
+  
+  training.simple <- DT.simple[training_indices,]
+  testing.simple <- DT.simple[-training_indices,]
+  
+  rf.simple <- randomForest::randomForest(Score ~ .,data = training.simple, xtest = testing.simple %>% dplyr::select(-(Score)), ytest = testing.simple %>% dplyr::pull((Score)), importance = TRUE, ntree = 200)
+  
+  # 1. Open jpeg file
+  png(paste0("plots_rf/month/",company,"_",month,"score.png"))
+  # 2. Create the plot
+  plot(rf.simple)
+  # 3. Close the file
+  dev.off()
+  importance <- data.frame(rf.simple$importance)
+  importance$SD <- rf.simple$importanceSD
+  importance$month <- month
+  write.csv(importance, file = paste0("rf/month/",company,"_",month,"_score.csv"),row.names = TRUE)
+  
+  set.seed(42)
+
+  DT = df_full
+  
+  DT.simple <- DT %>% dplyr::select(c(score_pos,Close,High,Low,Open,Volume,day_dif,day_shift,dif_pos))
+  
+  training_indices <- sample(nrow(DT.simple),nrow(DT.simple)*80/100)
+  
+  training.simple <- DT.simple[training_indices,]
+  testing.simple <- DT.simple[-training_indices,]
+  
+  rf.simple <- randomForest::randomForest(score_pos ~ .,data = training.simple, xtest = testing.simple %>% dplyr::select(-(score_pos)), ytest = testing.simple %>% dplyr::pull((score_pos)), importance = TRUE, ntree = 200)
+  
+  # 1. Open jpeg file
+  png(paste0("plots_rf/month/",company,"_",month,"score_pos.png"))
+  # 2. Create the plot
+  plot(rf.simple)
+  # 3. Close the file
+  dev.off()
+  importance <- data.frame(rf.simple$importance)
+  importance$SD <- rf.simple$importanceSD
+  importance$month <- month
+  write.csv(importance, file = paste0("rf/month/",company,"_",month,"_score_sign.csv"),row.names = TRUE)
+
+}
+
+get_stats_d <- function(df_sent,df_market, company, method_corr = "spearman", day = "Friday"){
+  df_sent$Score <- as.numeric(df_sent$Score)
+  df_sent$Date <- as.Date(df_sent$Date)
+  
+  df_sent <- df_sent %>% dplyr::filter(weekdays(Date) == as.character(day))
+  df_market <- df_market %>% dplyr::filter(weekdays(Date) == as.character(day))
+  
+  scores_df <- aggregate(df_sent %>% group_by(Date) %>% dplyr::mutate(wmean = weighted.mean(Score,Retweets)) %>% dplyr::select(c(Date,Score,wmean)), FUN = mean, by = list(df_sent$Date)) %>% dplyr::mutate(score_pos = sign(wmean))
+
+  
+  df_full <- inner_join(scores_df,df_market) %>% dplyr::mutate(dif_pos = sign(as.numeric(day_dif))) %>% mutate(across(!Date, as.numeric)) %>% na.omit()
+  
+  rcor <- rcorr(as.matrix(df_full %>% dplyr::select(-Date)), type = method_corr)
+  write.csv(rcor[["r"]], file = paste0("correlations_full/day/",company,"_",method_corr,"_correlation_",day,".csv"),row.names = TRUE)
+  write.csv(rcor[["P"]], file = paste0("correlations_full/day/",company,"_",method_corr,"_pvalue_",day,".csv"),row.names = TRUE)
+  
+
+  melted_cormat <- melt(cor(df_full %>% dplyr::select_if(is.numeric), method = as.character(method_corr)))
+  print(melted_cormat %>% dplyr::filter(Var1 == "wmean"))
+  print(melted_cormat %>% dplyr::filter(Var1 == "Score"))
+  print(melted_cormat %>% dplyr::filter(Var1 == "score_pos"))
+  write.csv(melted_cormat, file = paste0("correlations/day/",company,"_",method_corr,day,".csv"),row.names = TRUE)
+  
+
+  plot <- ggplot(data = melted_cormat, aes(x=Var1, y=Var2, fill=value)) + 
+    geom_tile() + geom_text(aes(label = round(value, 2))) + labs(title = paste0(method_corr," correlation heatmap"), subtitle = paste0(as.character(company)," company"))
+  ggsave(paste("plots/day/",as.character(company),method_corr,day,"correlation_heatmap.png", sep = "_"), plot = plot, device = "png", width = 220, height = 140, units = "mm", dpi = 400)
+  
+  set.seed(42)
+
+  DT = df_full
+  
+  DT.simple <- DT %>% dplyr::select(c(wmean,Close,High,Low,Open,Volume,day_dif,day_shift,dif_pos))
+  
+  training_indices <- sample(nrow(DT.simple),nrow(DT.simple)*80/100)
+  
+  training.simple <- DT.simple[training_indices,]
+  testing.simple <- DT.simple[-training_indices,]
+  
+  rf.simple <- randomForest::randomForest(wmean ~ .,data = training.simple, xtest = testing.simple %>% dplyr::select(-(wmean)), ytest = testing.simple %>% dplyr::pull((wmean)), importance = TRUE, ntree = 200)
+  
+  # 1. Open jpeg file
+  png(paste0("plots_rf/day/",company,"_",day,"wmean.png"))
+  # 2. Create the plot
+  plot(rf.simple)
+  # 3. Close the file
+  dev.off()
+  importance <- data.frame(rf.simple$importance)
+  importance$SD <- rf.simple$importanceSD
+  importance$day <- day
+  write.csv(importance, file = paste0("rf/day/",company,"_",day,"_wmean.csv"),row.names = TRUE)
+  
+  set.seed(42)
+
+  DT = df_full
+  
+  DT.simple <- DT %>% dplyr::select(c(Score,Close,High,Low,Open,Volume,day_dif,day_shift,dif_pos))
+  
+  training_indices <- sample(nrow(DT.simple),nrow(DT.simple)*80/100)
+  
+  training.simple <- DT.simple[training_indices,]
+  testing.simple <- DT.simple[-training_indices,]
+  
+  rf.simple <- randomForest::randomForest(Score ~ .,data = training.simple, xtest = testing.simple %>% dplyr::select(-(Score)), ytest = testing.simple %>% dplyr::pull((Score)), importance = TRUE, ntree = 200)
+  
+  # 1. Open jpeg file
+  png(paste0("plots_rf/day/",company,"_",day,"score.png"))
+  # 2. Create the plot
+  plot(rf.simple)
+  # 3. Close the file
+  dev.off()
+  importance <- data.frame(rf.simple$importance)
+  importance$SD <- rf.simple$importanceSD
+  importance$day <- day
+  write.csv(importance, file = paste0("rf/day/",company,"_",day,"_score.csv"),row.names = TRUE)
+  
+  set.seed(42)
+
+  DT = df_full
+  
+  DT.simple <- DT %>% dplyr::select(c(score_pos,Close,High,Low,Open,Volume,day_dif,day_shift,dif_pos))
+  
+  training_indices <- sample(nrow(DT.simple),nrow(DT.simple)*80/100)
+  
+  training.simple <- DT.simple[training_indices,]
+  testing.simple <- DT.simple[-training_indices,]
+  
+  rf.simple <- randomForest::randomForest(score_pos ~ .,data = training.simple, xtest = testing.simple %>% dplyr::select(-(score_pos)), ytest = testing.simple %>% dplyr::pull((score_pos)), importance = TRUE, ntree = 200)
+  
+  # 1. Open jpeg file
+  png(paste0("plots_rf/day/",company,"_",day,"score_pos.png"))
+  # 2. Create the plot
+  plot(rf.simple)
+  # 3. Close the file
+  dev.off()
+  importance <- data.frame(rf.simple$importance)
+  importance$SD <- rf.simple$importanceSD
+  importance$day <- day
+  write.csv(importance, file = paste0("rf/day/",company,"_",day,"_score_sign.csv"),row.names = TRUE)
+
+}
+
+for(n in 1:12){
+  for(m in c("spearman","pearson")){
+    get_stats_m(danone_sent,danone_market,"Danone",m,n)
+  }}
+for(n in 1:12){
+  for(m in c("spearman","pearson")){
+    get_stats_m(airbus_sent,airbus_market,"Airbus",m,n)
+  }}
+for(n in 1:12){
+  for(m in c("spearman","pearson")){
+    get_stats_m(veolia_sent,veolia_market,"Veolia",m,n)
+  }}
+
+for(n in c("Monday","Tuesday","Wednesday","Thursday","Friday")){
+  for(m in c("spearman","pearson")){
+    get_stats_d(danone_sent,danone_market,"Danone",m,n)
+  }}
+
+for(n in c("Monday","Tuesday","Wednesday","Thursday","Friday")){
+  for(m in c("spearman","pearson")){
+    get_stats_d(airbus_sent,airbus_market,"Airbus",m,n)
+  }}
+
+for(n in c("Monday","Tuesday","Wednesday","Thursday","Friday")){
+  for(m in c("spearman","pearson")){
+    get_stats_d(veolia_sent,veolia_market,"Veolia",m,n)
+  }}
+
+```
+
+```{r functions2, echo = FALSE}
+
+get_stats_m2 <- function(df_sent,df_market, company, method_corr = "spearman", month = 1){
+  df_sent$Score <- as.numeric(df_sent$Score)
+  df_sent$Date <- as.Date(df_sent$Date)
+  
+  df_sent <- df_sent %>% dplyr::filter(month(Date) == as.numeric(month))
+  df_market <- df_market %>% dplyr::filter(month(Date) == as.numeric(month))
+  
+  scores_df <- aggregate(df_sent %>% group_by(Date) %>% 
+                           dplyr::mutate(wmean = weighted.mean(Score,Retweets)) %>%
+                           dplyr::select(c(Date,Score,wmean)), FUN = mean, by = list(df_sent$Date)) %>%
+    dplyr::mutate(score_pos = sign(wmean))
+  
+  df_full <- inner_join(scores_df,df_market) %>% dplyr::mutate(dif_pos = sign(as.numeric(day_dif))) %>% mutate(across(!Date, as.numeric)) %>% na.omit()
+  
+  rcor <- rcorr(as.matrix(df_full %>% dplyr::select(-Date)), type = method_corr)
+  write.csv(rcor[["r"]], file = paste0("correlations_full2/",company,"_",method_corr,"_correlation_",month,".csv"),row.names = TRUE)
+  write.csv(rcor[["P"]], file = paste0("correlations_full2/",company,"_",method_corr,"_pvalue_",month,".csv"),row.names = TRUE)
+  
+
+  melted_cormat <- melt(cor(df_full %>% dplyr::select_if(is.numeric), method = as.character(method_corr)))
+  print(melted_cormat %>% dplyr::filter(Var1 == "wmean"))
+  print(melted_cormat %>% dplyr::filter(Var1 == "Score"))
+  print(melted_cormat %>% dplyr::filter(Var1 == "score_pos"))
+  write.csv(melted_cormat, file = paste0("correlations2/month/",company,"_",method_corr,month,".csv"),row.names = TRUE)
+  
+
+  plot <- ggplot(data = melted_cormat, aes(x=Var1, y=Var2, fill=value)) + 
+    geom_tile() + geom_text(aes(label = round(value, 2))) + labs(title = paste0(method_corr," correlation heatmap"), subtitle = paste0(as.character(company)," company"))
+  ggsave(paste("plots2/month/",as.character(company),method_corr,month,"correlation_heatmap.png", sep = "_"), plot = plot, device = "png",  width = 220, height = 140, units = "mm", dpi = 400)
+  
+  set.seed(42)
+
+  DT = df_full
+  
+  DT.simple <- DT %>% dplyr::select(c(wmean,Close,High,Low,Open,Volume,day_dif,day_shift,dif_pos))
+  
+  training_indices <- sample(nrow(DT.simple),nrow(DT.simple)*80/100)
+  
+  training.simple <- DT.simple[training_indices,]
+  testing.simple <- DT.simple[-training_indices,]
+  
+  rf.simple <- randomForest::randomForest(wmean ~ .,data = training.simple, xtest = testing.simple %>% dplyr::select(-(wmean)), ytest = testing.simple %>% dplyr::pull((wmean)), importance = TRUE, ntree = 200)
+  
+  # 1. Open jpeg file
+  png(paste0("plots_rf2/month/",company,"_",month,"wmean.png"))
+  # 2. Create the plot
+  plot(rf.simple)
+  # 3. Close the file
+  dev.off()
+  importance <- data.frame(rf.simple$importance)
+  importance$SD <- rf.simple$importanceSD
+  importance$month <- month
+  write.csv(importance, file = paste0("rf2/month/",company,"_",month,"_wmean.csv"),row.names = TRUE)
+  
+  set.seed(42)
+
+  DT = df_full
+  
+  DT.simple <- DT %>% dplyr::select(c(Score,Close,High,Low,Open,Volume,day_dif,day_shift,dif_pos))
+  
+  training_indices <- sample(nrow(DT.simple),nrow(DT.simple)*80/100)
+  
+  training.simple <- DT.simple[training_indices,]
+  testing.simple <- DT.simple[-training_indices,]
+  
+  rf.simple <- randomForest::randomForest(Score ~ .,data = training.simple, xtest = testing.simple %>% dplyr::select(-(Score)), ytest = testing.simple %>% dplyr::pull((Score)), importance = TRUE, ntree = 200)
+  
+  # 1. Open jpeg file
+  png(paste0("plots_rf2/month/",company,"_",month,"score.png"))
+  # 2. Create the plot
+  plot(rf.simple)
+  # 3. Close the file
+  dev.off()
+  importance <- data.frame(rf.simple$importance)
+  importance$SD <- rf.simple$importanceSD
+  importance$month <- month
+  write.csv(importance, file = paste0("rf2/month/",company,"_",month,"_score.csv"),row.names = TRUE)
+  
+  set.seed(42)
+
+  DT = df_full
+  
+  DT.simple <- DT %>% dplyr::select(c(score_pos,Close,High,Low,Open,Volume,day_dif,day_shift,dif_pos))
+  
+  training_indices <- sample(nrow(DT.simple),nrow(DT.simple)*80/100)
+  
+  training.simple <- DT.simple[training_indices,]
+  testing.simple <- DT.simple[-training_indices,]
+  
+  rf.simple <- randomForest::randomForest(score_pos ~ .,data = training.simple, xtest = testing.simple %>% dplyr::select(-(score_pos)), ytest = testing.simple %>% dplyr::pull((score_pos)), importance = TRUE, ntree = 200)
+  
+  # 1. Open jpeg file
+  png(paste0("plots_rf2/month/",company,"_",month,"score_pos.png"))
+  # 2. Create the plot
+  plot(rf.simple)
+  # 3. Close the file
+  dev.off()
+  importance <- data.frame(rf.simple$importance)
+  importance$SD <- rf.simple$importanceSD
+  importance$month <- month
+  write.csv(importance, file = paste0("rf2/month/",company,"_",month,"_score_sign.csv"),row.names = TRUE)
+
+}
+
+get_stats_d2 <- function(df_sent,df_market, company, method_corr = "spearman", day = "Friday"){
+  df_sent$Score <- as.numeric(df_sent$Score)
+  df_sent$Date <- as.Date(df_sent$Date)
+  
+  df_sent <- df_sent %>% dplyr::filter(weekdays(Date) == as.character(day))
+  df_market <- df_market %>% dplyr::filter(weekdays(Date) == as.character(day))
+  
+  scores_df <- aggregate(df_sent %>% group_by(Date) %>% dplyr::mutate(wmean = weighted.mean(Score,Retweets)) %>% dplyr::select(c(Date,Score,wmean)), FUN = mean, by = list(df_sent$Date)) %>% dplyr::mutate(score_pos = sign(wmean))
+
+  
+  df_full <- inner_join(scores_df,df_market) %>% dplyr::mutate(dif_pos = sign(as.numeric(day_dif))) %>% mutate(across(!Date, as.numeric)) %>% na.omit()
+  
+  rcor <- rcorr(as.matrix(df_full %>% dplyr::select(-Date)), type = method_corr)
+  write.csv(rcor[["r"]], file = paste0("correlations_full2/day/",company,"_",method_corr,"_correlation_",day,".csv"),row.names = TRUE)
+  write.csv(rcor[["P"]], file = paste0("correlations_full2/day/",company,"_",method_corr,"_pvalue_",day,".csv"),row.names = TRUE)
+  
+
+  melted_cormat <- melt(cor(df_full %>% dplyr::select_if(is.numeric), method = as.character(method_corr)))
+  print(melted_cormat %>% dplyr::filter(Var1 == "wmean"))
+  print(melted_cormat %>% dplyr::filter(Var1 == "Score"))
+  print(melted_cormat %>% dplyr::filter(Var1 == "score_pos"))
+  write.csv(melted_cormat, file = paste0("correlations2/day/",company,"_",method_corr,day,".csv"),row.names = TRUE)
+  
+
+  plot <- ggplot(data = melted_cormat, aes(x=Var1, y=Var2, fill=value)) + 
+    geom_tile() + geom_text(aes(label = round(value, 2))) + labs(title = paste0(method_corr," correlation heatmap"), subtitle = paste0(as.character(company)," company"))
+  ggsave(paste("plots2/day/",as.character(company),method_corr,day,"correlation_heatmap.png", sep = "_"), plot = plot, device = "png", width = 220, height = 140, units = "mm", dpi = 400)
+  
+  set.seed(42)
+
+  DT = df_full
+  
+  DT.simple <- DT %>% dplyr::select(c(wmean,Close,High,Low,Open,Volume,day_dif,day_shift,dif_pos))
+  
+  training_indices <- sample(nrow(DT.simple),nrow(DT.simple)*80/100)
+  
+  training.simple <- DT.simple[training_indices,]
+  testing.simple <- DT.simple[-training_indices,]
+  
+  rf.simple <- randomForest::randomForest(wmean ~ .,data = training.simple, xtest = testing.simple %>% dplyr::select(-(wmean)), ytest = testing.simple %>% dplyr::pull((wmean)), importance = TRUE, ntree = 200)
+  
+  # 1. Open jpeg file
+  png(paste0("plots_rf2/day/",company,"_",day,"wmean.png"))
+  # 2. Create the plot
+  plot(rf.simple)
+  # 3. Close the file
+  dev.off()
+  importance <- data.frame(rf.simple$importance)
+  importance$SD <- rf.simple$importanceSD
+  importance$day <- day
+  write.csv(importance, file = paste0("rf2/day/",company,"_",day,"_wmean.csv"),row.names = TRUE)
+  
+  set.seed(42)
+
+  DT = df_full
+  
+  DT.simple <- DT %>% dplyr::select(c(Score,Close,High,Low,Open,Volume,day_dif,day_shift,dif_pos))
+  
+  training_indices <- sample(nrow(DT.simple),nrow(DT.simple)*80/100)
+  
+  training.simple <- DT.simple[training_indices,]
+  testing.simple <- DT.simple[-training_indices,]
+  
+  rf.simple <- randomForest::randomForest(Score ~ .,data = training.simple, xtest = testing.simple %>% dplyr::select(-(Score)), ytest = testing.simple %>% dplyr::pull((Score)), importance = TRUE, ntree = 200)
+  
+  # 1. Open jpeg file
+  png(paste0("plots_rf2/day/",company,"_",day,"score.png"))
+  # 2. Create the plot
+  plot(rf.simple)
+  # 3. Close the file
+  dev.off()
+  importance <- data.frame(rf.simple$importance)
+  importance$SD <- rf.simple$importanceSD
+  importance$day <- day
+  write.csv(importance, file = paste0("rf2/day/",company,"_",day,"_score.csv"),row.names = TRUE)
+  
+  set.seed(42)
+
+  DT = df_full
+  
+  DT.simple <- DT %>% dplyr::select(c(score_pos,Close,High,Low,Open,Volume,day_dif,day_shift,dif_pos))
+  
+  training_indices <- sample(nrow(DT.simple),nrow(DT.simple)*80/100)
+  
+  training.simple <- DT.simple[training_indices,]
+  testing.simple <- DT.simple[-training_indices,]
+  
+  rf.simple <- randomForest::randomForest(score_pos ~ .,data = training.simple, xtest = testing.simple %>% dplyr::select(-(score_pos)), ytest = testing.simple %>% dplyr::pull((score_pos)), importance = TRUE, ntree = 200)
+  
+  # 1. Open jpeg file
+  png(paste0("plots_rf2/day/",company,"_",day,"score_pos.png"))
+  # 2. Create the plot
+  plot(rf.simple)
+  # 3. Close the file
+  dev.off()
+  importance <- data.frame(rf.simple$importance)
+  importance$SD <- rf.simple$importanceSD
+  importance$day <- day
+  write.csv(importance, file = paste0("rf2/day/",company,"_",day,"_score_sign.csv"),row.names = TRUE)
+
+}
+
+for(n in 1:12){
+  for(m in c("spearman","pearson")){
+    get_stats_m2(danone_sent,danone_market,"Danone",m,n)
+  }}
+for(n in 1:12){
+  for(m in c("spearman","pearson")){
+    get_stats_m2(airbus_sent,airbus_market,"Airbus",m,n)
+  }}
+for(n in 1:12){
+  for(m in c("spearman","pearson")){
+    get_stats_m2(veolia_sent,veolia_market,"Veolia",m,n)
+  }}
+
+for(n in c("Monday","Tuesday","Wednesday","Thursday","Friday")){
+  for(m in c("spearman","pearson")){
+    get_stats_d2(danone_sent,danone_market,"Danone",m,n)
+  }}
+
+for(n in c("Monday","Tuesday","Wednesday","Thursday","Friday")){
+  for(m in c("spearman","pearson")){
+    get_stats_d2(airbus_sent,airbus_market,"Airbus",m,n)
+  }}
+
+for(n in c("Monday","Tuesday","Wednesday","Thursday","Friday")){
+  for(m in c("spearman","pearson")){
+    get_stats_d2(veolia_sent,veolia_market,"Veolia",m,n)
+  }}
+
+```
+
+```{r nonlinear}
+
+get_nonlincor <- function(df_sent,df_market,var){
+
+  df_sent$Score <- as.numeric(df_sent$Score)
+
+  df_sent$Date <- as.Date(df_sent$Date)
+  
+  scores_df <- aggregate(df_sent %>% group_by(Date) %>% dplyr::mutate(wmean = weighted.mean(Score,Retweets)) %>% dplyr::select(c(Date,Score,wmean)), FUN = mean, by = list(df_sent$Date)) %>% dplyr::mutate(score_pos = sign(wmean))
+  
+  df_full <- inner_join(scores_df,df_market) %>% dplyr::mutate(dif_pos = sign(as.numeric(day_dif))) %>% mutate(across(!Date, as.numeric)) %>% na.omit() %>% dplyr::select(-c(Date,Group.1))
+
+  nlcor(df_full %>% dplyr::pull(var),(df_full$wmean), plt = T)
+
+}
+
+for(var in colnames(danone_market)[2:9]){
+  print(var)
+  res <- get_nonlincor(danone_sent,danone_market, var)
+  print(res)
+}
+
+get_tree <- function(df_sent,df_market){
+
+  df_sent$Score <- as.numeric(df_sent$Score)
+
+  df_sent$Date <- as.Date(df_sent$Date)
+  
+  scores_df <- aggregate(df_sent %>% group_by(Date) %>% dplyr::mutate(wmean = weighted.mean(Score,Retweets)) %>% dplyr::select(c(Date,Score,wmean)), FUN = mean, by = list(df_sent$Date)) %>% dplyr::mutate(score_pos = sign(wmean))
+  
+  df_full <- inner_join(scores_df,df_market) %>% dplyr::mutate(dif_pos = sign(as.numeric(day_dif))) %>% mutate(across(!Date, as.numeric)) %>% na.omit() %>% dplyr::select(-c(Date,Group.1)) %>% dplyr::mutate(score_pos = as.factor(score_pos))
+
+  fit <- randomForest(Close~., data = df_full %>% dplyr::select(c(Score,wmean,score_pos,Close)), na.action = na.roughfix)
+  fit2 <- randomForest(score_pos~., data = df_full %>% dplyr::select(-c(wmean,Score)), na.action = na.roughfix)
+
+}
+
+
+
+```
+
+
+```{r stat}
+
+get_monthly_corr <- function(company,method){
+  max_score <- list()
+  max_pondered <- list()
+  max_pos <- list()
+  
+  max_vals_p <- list()
+  max_vals_s <- list()
+  max_vals_pos <- list()
+  
+  wmeanlist <- list()
+  
+  close_list <- list()
+  high_list <- list()
+  low_list <- list()
+  open_list <- list()
+  volume_list <- list()
+  daydif_list <- list()
+  dayshift_list <- list()
+  difpos_list <- list()
+  
+  monthly_wmean_mean <- list()
+  monthly_score_mean <- list()
+  
+  for(month in 1:12){
+    wmeanlist <- list()
+    file = paste0("correlations_full/month/",company,"_",method,"_correlation_",as.character(month),".csv")
+    print(file)
+    tableau <- read.csv2(file,sep = ",", encoding = "UTF-8") %>%
+      dplyr::select(-c(wmean,Score,score_pos,Group.1)) %>% 
+      dplyr::filter(X %in% c("wmean","Score","score_pos")) %>% dplyr::mutate(across(Close:dif_pos,as.numeric))
+    #Pondered score
+    index_p <- tableau %>% dplyr::filter(X == "wmean") %>% dplyr::select(-X) %>% abs() %>% which.max()
+    max_p <- tableau %>% dplyr::filter(X == "wmean") %>% dplyr::select(-X) %>% abs() %>% max()
+    max_vals_p <- append(max_vals_p,as.character(attributes(index_p)))
+    max_pondered <- append(max_pondered, max_p)
+    #Mean score
+    index_s <- tableau %>% dplyr::filter(X == "Score") %>% dplyr::select(-X) %>% abs() %>% which.max()
+    max_s <- tableau %>% dplyr::filter(X == "Score") %>% dplyr::select(-X) %>% abs() %>% max()
+    max_vals_s <- append(max_vals_s,as.character(attributes(index_s)))
+    max_score <- append(max_score, max_s)
+    #Score pos
+    index_pos <- tableau %>% dplyr::filter(X == "score_pos") %>% dplyr::select(-X)%>% abs() %>% which.max()
+    max_po <- tableau %>% dplyr::filter(X == "score_pos") %>% dplyr::select(-X)%>% abs() %>% max()
+    max_vals_pos <- append(max_vals_pos,as.character(attributes(index_pos)))
+    max_pos <- append(max_pos, max_po)
+    
+    
+    for(cl in colnames(tableau)){
+      z = tableau %>% dplyr::filter(X == "wmean") %>% dplyr::select(cl)
+      wmeanlist <- append(wmeanlist,z)
+    }
+    close_list <- append(close_list,wmeanlist[2])
+    high_list <- append(high_list,wmeanlist[3])
+    low_list <- append(low_list,wmeanlist[4])
+    open_list <- append(open_list,wmeanlist[5])
+    volume_list <- append(volume_list,wmeanlist[6])
+    daydif_list <- append(daydif_list,wmeanlist[7])
+    dayshift_list <- append(dayshift_list,wmeanlist[8])
+    difpos_list <- append(difpos_list,wmeanlist[9])
+  }
+  monthly_wmean_mean <- append(monthly_wmean_mean,c(
+  median(abs(as.numeric(close_list)),na.rm=TRUE),
+  median(abs(as.numeric(high_list)),na.rm=TRUE),
+  median(abs(as.numeric(low_list)),na.rm=TRUE),
+  median(abs(as.numeric(open_list)),na.rm=TRUE),
+  median(abs(as.numeric(volume_list)),na.rm=TRUE),
+  median(abs(as.numeric(daydif_list)),na.rm=TRUE),
+  median(abs(as.numeric(dayshift_list)),na.rm=TRUE),
+  median(abs(as.numeric(difpos_list)),na.rm=TRUE)))
+
+  corr_scores <- data.frame(qpcR:::cbind.na(max_score = unlist(max_score), valeur_s_max = unlist(max_vals_s), 
+                            max_p_score = unlist(max_pondered), valeur_p_max = unlist(max_vals_p),
+                            max_pos_score = unlist(max_pos), valeur_pos_max = unlist(max_vals_pos),
+                            median_wmean = unlist(monthly_wmean_mean),
+                            month = c("Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec")))
+  
+  write.csv(corr_scores, file = paste0("correlations_full/",company,"_",method,"_monthly_summary.csv"),
+            row.names = TRUE)
+}
+
+get_weekday_corr <- function(company,method){
+  max_score <- list()
+  max_pondered <- list()
+  max_pos <- list()
+  
+  max_vals_p <- list()
+  max_vals_s <- list()
+  max_vals_pos <- list()
+  
+  day_wmean_mean <- list()
+  day_score_mean <- list()
+  
+  for(day in c("Monday","Tuesday","Wednesday","Thursday","Friday")){
+    file = paste0("correlations_full/day/",company,"_",method,"_correlation_",day,".csv")
+    print(file)
+    tableau <- read.csv2(file,sep = ",", encoding = "UTF-8") %>%
+      dplyr::select(-c(wmean,Score,score_pos,Group.1)) %>% 
+      dplyr::filter(X %in% c("wmean","Score","score_pos")) %>% dplyr::mutate(across(Close:dif_pos,as.numeric))
+    
+    index_p <- tableau %>% dplyr::filter(X == "wmean") %>% dplyr::select(-X) %>% which.max()
+    max_p <- tableau %>% dplyr::filter(X == "wmean") %>% dplyr::select(-X) %>% max()
+    max_vals_p <- append(max_vals_p,as.character(attributes(index_p)))
+    max_pondered <- append(max_pondered, max_p)
+      
+    index_s <- tableau %>% dplyr::filter(X == "Score") %>% dplyr::select(-X) %>% which.max()
+    max_s <- tableau %>% dplyr::filter(X == "Score") %>% dplyr::select(-X) %>% max()
+    max_vals_s <- append(max_vals_s,as.character(attributes(index_s)))
+    max_score <- append(max_score, max_s)
+      
+    index_pos <- tableau %>% dplyr::filter(X == "score_pos") %>% dplyr::select(-X) %>% which.max()
+    max_po <- tableau %>% dplyr::filter(X == "score_pos") %>% dplyr::select(-X) %>% max()
+    max_vals_pos <- append(max_vals_pos,as.character(attributes(index_pos)))
+    max_pos <- append(max_pos, max_po)
+    
+    wmean_mean <- tableau %>% dplyr::filter(X == "wmean") %>% dplyr::select() %>% mean()
+    day_wmean_mean <- append(day_wmean_mean,wmean_mean)
+        
+    score_mean <- tableau %>% dplyr::filter(X == "Score") %>% dplyr::select(-X) %>% mean()
+    day_score_mean <- append(day_score_mean,score_mean)
+    
+  }
+  
+  corr_scores <- data.frame(qpcR:::cbind.na(max_score = unlist(max_score), valeur_s_max = unlist(max_vals_s), 
+                            max_p_score = unlist(max_pondered), valeur_p_max = unlist(max_vals_p),
+                            max_pos_score = unlist(max_pos), valeur_pos_max = unlist(max_vals_pos),
+                            wmean_mean = unlist(day_wmean_mean), score_mean = unlist(day_score_mean),
+                            day = c("Monday","Tuesday","Wednesday","Thursday","Friday")))
+  
+  write.csv(corr_scores, file = paste0("correlations_full/",company,"_",method,"_daily_summary.csv"),
+            row.names = TRUE)
+}
+
+get_monthly_pvalue <- function(company,method){
+  max_score <- list()
+  max_pondered <- list()
+  max_pos <- list()
+  
+  max_vals_p <- list()
+  max_vals_s <- list()
+  max_vals_pos <- list()
+  
+  for(month in 1:12){
+    file = paste0("correlations_full/month/",company,"_",method,"_pvalue_",as.character(month),".csv")
+    print(file)
+    tableau <- read.csv2(file,sep = ",", encoding = "UTF-8") %>%
+      dplyr::select(-c(wmean,Score,score_pos, Group.1)) %>% 
+      dplyr::filter(X %in% c("wmean","Score","score_pos")) %>% dplyr::mutate(across(Close:dif_pos,as.numeric))
+    
+    index_p <- tableau %>% dplyr::filter(X == "wmean") %>% dplyr::select(-X) %>% which.max()
+    max_p <- tableau %>% dplyr::filter(X == "wmean") %>% dplyr::select(-X) %>% max()
+    max_vals_p <- append(max_vals_p,as.character(attributes(index_p)))
+    max_pondered <- append(max_pondered, max_p)
+      
+    index_s <- tableau %>% dplyr::filter(X == "Score") %>% dplyr::select(-X) %>% which.max()
+    max_s <- tableau %>% dplyr::filter(X == "Score") %>% dplyr::select(-X) %>% max()
+    max_vals_s <- append(max_vals_s,as.character(attributes(index_s)))
+    max_score <- append(max_score, max_s)
+      
+    index_pos <- tableau %>% dplyr::filter(X == "score_pos") %>% dplyr::select(-X) %>% which.max()
+    max_po <- tableau %>% dplyr::filter(X == "score_pos") %>% dplyr::select(-X) %>% max()
+    max_vals_pos <- append(max_vals_pos,as.character(attributes(index_pos)))
+    max_pos <- append(max_pos, max_po)
+    
+  }
+
+  corr_scores <- data.frame(qpcR:::cbind.na(max_score = unlist(max_score), valeur_s_max = unlist(max_vals_s), 
+                            max_p_score = unlist(max_pondered), valeur_p_max = unlist(max_vals_p),
+                            max_pos_score = unlist(max_pos), valeur_pos_max = unlist(max_vals_pos),
+                            month = c("Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec")))
+  
+  write.csv(corr_scores, file = paste0("correlations_full/",company,"_",method,"_monthly_summary_pvalue.csv"),
+            row.names = TRUE)
+}
+
+get_weekday_pvalue <- function(company,method){
+  max_score <- list()
+  max_pondered <- list()
+  max_pos <- list()
+  
+  max_vals_p <- list()
+  max_vals_s <- list()
+  max_vals_pos <- list()
+  
+  
+  for(day in c("Monday","Tuesday","Wednesday","Thursday","Friday")){
+    file = paste0("correlations_full/day/",company,"_",method,"_pvalue_",day,".csv")
+    print(file)
+    tableau <- read.csv2(file,sep = ",", encoding = "UTF-8") %>%
+      dplyr::select(-c(wmean,Score,score_pos)) %>% 
+      dplyr::filter(X %in% c("wmean","Score","score_pos")) %>% dplyr::mutate(across(Close:dif_pos,as.numeric))
+    
+    index_p <- tableau %>% dplyr::filter(X == "wmean") %>% dplyr::select(-X) %>% which.max()
+    max_p <- tableau %>% dplyr::filter(X == "wmean") %>% dplyr::select(-X) %>% max()
+    max_vals_p <- append(max_vals_p,as.character(attributes(index_p)))
+    max_pondered <- append(max_pondered, max_p)
+      
+    index_s <- tableau %>% dplyr::filter(X == "Score") %>% dplyr::select(-X) %>% which.max()
+    max_s <- tableau %>% dplyr::filter(X == "Score") %>% dplyr::select(-X) %>% max()
+    max_vals_s <- append(max_vals_s,as.character(attributes(index_s)))
+    max_score <- append(max_score, max_s)
+      
+    index_pos <- tableau %>% dplyr::filter(X == "score_pos") %>% dplyr::select(-X) %>% which.max()
+    max_po <- tableau %>% dplyr::filter(X == "score_pos") %>% dplyr::select(-X) %>% max()
+    max_vals_pos <- append(max_vals_pos,as.character(attributes(index_pos)))
+    max_pos <- append(max_pos, max_po)
+    
+  }
+  
+  corr_scores <- data.frame(qpcR:::cbind.na(max_score = unlist(max_score), valeur_s_max = unlist(max_vals_s), 
+                            max_p_score = unlist(max_pondered), valeur_p_max = unlist(max_vals_p),
+                            max_pos_score = unlist(max_pos), valeur_pos_max = unlist(max_vals_pos),
+                            day = c("Monday","Tuesday","Wednesday","Thursday","Friday")))
+  
+  write.csv(corr_scores, file = paste0("correlations_full/",company,"_",method,"_daily_summary_pvalue.csv"),
+            row.names = TRUE)
+}
+
+
+for(c in c("Airbus","Danone","Veolia")){
+  for(m in c("spearman","pearson")){
+    get_monthly_corr(c,m)
+    #get_monthly_pvalue(c,m)
+    get_weekday_corr(c,m)
+    #get_weekday_pvalue(c,m)
+  }
+}
+
+tab1 <- read.csv2("correlations_full/Airbus_spearman_monthly_summary.csv",sep=",")
+ggplot() + geom_line(aes(x = month, y = max_score))
+
+
+ggplot(df_full)  + 
+    geom_bar(aes(x=Date, y=Close),stat="identity", fill="tan1", colour="sienna3")+
+    geom_line(aes(x=Date, y=Score*max(df_full$Close)),stat="identity")+
+    geom_text(aes(label=Score, x=Date, y=Score*max(df_full$Close)), colour="black")+
+    geom_text(aes(label=Close, x=Date, y=0.95*Close), colour="black")+
+    scale_y_continuous(sec.axis = sec_axis(~./max(df_full$Close)))
+
+```
